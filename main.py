@@ -11,15 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 EMAIL = "24f3002540@ds.study.iitm.ac.in"
 
-ALLOWED_APP_ORIGIN = "https://app-zt3wel.example.com"
-
-EXAM_ORIGIN = os.getenv("EXAM_ORIGIN", "")
-
-ALLOWED_ORIGINS = [ALLOWED_APP_ORIGIN]
-
-if EXAM_ORIGIN:
-    ALLOWED_ORIGINS.append(EXAM_ORIGIN)
-
+ALLOWED_ORIGINS = [
+    "https://app-zt3wel.example.com",
+    "https://middleware-stack-0ihn.onrender.com"
+]
 
 RATE_LIMIT = 11
 WINDOW_SECONDS = 10
@@ -95,10 +90,9 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "OPTIONS"],
-    allow_headers=["X-Request-ID", "X-Client-Id", "Content-Type"],
+    allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
-
 
 # Add request context middleware
 # Important: this should run first
