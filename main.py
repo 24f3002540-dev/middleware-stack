@@ -1,75 +1,75 @@
-import os
 import time
 import uuid
 from collections import defaultdict, deque
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 
 
 EMAIL = "24f3002540@ds.study.iitm.ac.in"
 
-ALLOWED_ORIGINS = [
+ALLOWED_ORIGINS = {
     "https://app-zt3wel.example.com",
-]
 
-EXAM_ORIGIN = os.getenv("EXAM_ORIGIN", "")
-if EXAM_ORIGIN:
-    ALLOWED_ORIGINS.append(EXAM_ORIGIN)
+    "https://middleware-stack-0ihn.onrender.com",
+}
 
 RATE_LIMIT = 11
 WINDOW_SECONDS = 10
 
-
-class RequestContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-        request.state.request_id = request_id
-
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app):
-        super().__init__(app)
-        self.clients = defaultdict(deque)
-
-    async def dispatch(self, request: Request, call_next):
-        if request.method == "OPTIONS":
-            return await call_next(request)
-
-        client_id = request.headers.get("X-Client-Id", "anonymous")
-        now = time.monotonic()
-
-        bucket = self.clients[client_id]
-
-        while bucket and now - bucket[0] >= WINDOW_SECONDS:
-            bucket.popleft()
-
-        if len(bucket) >= RATE_LIMIT:
-            request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
-
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "detail": "rate limit exceeded",
-                    "request_id": request_id,
-                },
-                headers={
-                    "X-Request-ID": request_id,
-                },
-            )
-
-        bucket.append(now)
-
-        return await call_next(request)
-
+clients = defaultdict(deque)
 
 app = FastAPI()
+
+
+def add_cors_headers(response: Response, origin: str | None):
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "X-Request-ID, X-Client-Id, Content-Type"
+        response.headers["Access-Control-Expose-Headers"] = "X-Request-ID"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+@app.middleware("http")
+async def combined_middleware(request: Request, call_next):
+    origin = request.headers.get("origin")
+
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+
+    # CORS preflight
+    if request.method == "OPTIONS":
+        response = Response(status_code=204)
+        response.headers["X-Request-ID"] = request_id
+        return add_cors_headers(response, origin)
+
+    # Rate limit
+    client_id = request.headers.get("X-Client-Id", "anonymous")
+    now = time.monotonic()
+    bucket = clients[client_id]
+
+    while bucket and now - bucket[0] >= WINDOW_SECONDS:
+        bucket.popleft()
+
+    if len(bucket) >= RATE_LIMIT:
+        response = JSONResponse(
+            status_code=429,
+            content={
+                "detail": "rate limit exceeded",
+                "request_id": request_id,
+            },
+        )
+        response.headers["X-Request-ID"] = request_id
+        return add_cors_headers(response, origin)
+
+    bucket.append(now)
+
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return add_cors_headers(response, origin)
 
 
 @app.get("/")
@@ -78,25 +78,8 @@ def home():
 
 
 @app.get("/ping")
-async def ping(request: Request):
+def ping(request: Request):
     return {
         "email": EMAIL,
         "request_id": request.state.request_id,
     }
-
-
-# Add RateLimit first
-app.add_middleware(RateLimitMiddleware)
-
-# Add RequestContext second
-app.add_middleware(RequestContextMiddleware)
-
-# Add CORS last so it becomes outermost
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["X-Request-ID"],
-)
