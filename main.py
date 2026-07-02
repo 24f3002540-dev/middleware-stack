@@ -13,7 +13,6 @@ EMAIL = "24f3002540@ds.study.iitm.ac.in"
 
 ALLOWED_APP_ORIGIN = "https://app-zt3wel.example.com"
 
-# Add exam page origin using environment variable if needed
 EXAM_ORIGIN = os.getenv("EXAM_ORIGIN", "")
 
 ALLOWED_ORIGINS = [ALLOWED_APP_ORIGIN]
