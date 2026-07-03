@@ -1,11 +1,12 @@
 import time
 import uuid
 from collections import defaultdict, deque
+from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-# Tere assigned values
+# Assigned values
 EMAIL = "24f3002540@ds.study.iitm.ac.in"
 RATE_LIMIT = 11
 WINDOW_SECONDS = 10
@@ -15,26 +16,26 @@ clients = defaultdict(deque)
 
 app = FastAPI()
 
-def apply_cors_headers(response: Response, origin: str | None) -> Response:
-    # 1. Grader check: "Only your assigned allowed origin may receive ACAO header"
-    # 2. Grader check: "Also allow this exam page's origin" (IITM domains)
+
+def apply_cors_headers(response: Response, origin: Optional[str]) -> Response:
+    # 1. Only the assigned allowed origin may receive an ACAO header
+    # 2. Also allow the exam page's origin (IITM domains) so verification works
     is_allowed = False
-    
+
     if origin == ASSIGNED_ORIGIN:
         is_allowed = True
     elif origin and ("iitm.ac.in" in origin or "onlinedegree" in origin or "localhost" in origin):
         is_allowed = True
 
-    # Agar origin allowed hai, toh headers attach kar. 
-    # Agar grader fake domain bhejta hai (negative test), toh headers attach NAHI honge.
     if is_allowed:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "X-Request-ID, X-Client-Id, Content-Type"
         response.headers["Access-Control-Expose-Headers"] = "X-Request-ID"
-    
+
     return response
+
 
 @app.middleware("http")
 async def master_middleware(request: Request, call_next):
@@ -46,7 +47,7 @@ async def master_middleware(request: Request, call_next):
     req_id = request.headers.get("X-Request-ID")
     if not req_id:
         req_id = str(uuid.uuid4())
-    
+
     request.state.request_id = req_id
 
     # ==========================================
@@ -64,31 +65,30 @@ async def master_middleware(request: Request, call_next):
     now = time.monotonic()
     bucket = clients[client_id]
 
-    # 10 second window se purani requests hatao
+    # Evict entries older than the window
     while bucket and now - bucket[0] >= WINDOW_SECONDS:
         bucket.popleft()
 
-    # Agar 11 requests aa chuki hain, toh 429 trigger karo
+    # If already at the limit, trigger 429
     if len(bucket) >= RATE_LIMIT:
         response = JSONResponse(
             status_code=429,
             content={
                 "detail": "rate limit exceeded",
-                "request_id": req_id
-            }
+                "request_id": req_id,
+            },
         )
         response.headers["X-Request-ID"] = req_id
         return apply_cors_headers(response, origin)
 
-    # Request allow karo
+    # Allow the request
     bucket.append(now)
 
     # ==========================================
     # Proceed to Endpoint
     # ==========================================
     response = await call_next(request)
-    
-    # Endpoint response mein header inject karo
+
     response.headers["X-Request-ID"] = req_id
     return apply_cors_headers(response, origin)
 
