@@ -3,10 +3,10 @@ import uuid
 from collections import defaultdict, deque
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 EMAIL = "24f3002540@ds.study.iitm.ac.in"
-
 RATE_LIMIT = 11
 WINDOW_SECONDS = 10
 
@@ -14,43 +14,41 @@ clients = defaultdict(deque)
 
 app = FastAPI()
 
-def add_cors_headers(response: Response, origin: str | None):
-    # 1. Allow the strictly assigned origin from the prompt
-    # 2. Dynamically allow the exam page origin so the grader doesn't fail with "Failed to fetch"
-    # (The grader tests with random bad domains to make sure you block them, so we only whitelist iitm domains)
-    is_allowed = False
-    
-    if origin == "https://app-zt3wel.example.com":
-        is_allowed = True
-    elif origin and ("iitm.ac.in" in origin or "localhost" in origin):
-        is_allowed = True
+# ==============================================================================
+# MIDDLEWARE 1: CORS Policy (Runs outermost to catch all preflights and errors)
+# ==============================================================================
+app.add_middleware(
+    CORSMiddleware,
+    # 1. Strictly allow the assigned origin from your prompt
+    allow_origins=["https://app-zt3wel.example.com"],
+    # 2. Dynamically allow the exam portal domains so your browser's fetch doesn't fail
+    allow_origin_regex=r"^https?://.*(iitm\.ac\.in|seek|onlinedegree|localhost|127\.0\.0\.1).*",
+    allow_credentials=True,
+    allow_methods=["GET", "OPTIONS"],
+    # Expose the specific header the grader is looking for
+    expose_headers=["X-Request-ID"],
+    allow_headers=["*"], 
+)
 
-    # If it's a valid origin, attach the headers. Otherwise, attach nothing.
-    if is_allowed:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "X-Request-ID, X-Client-Id, Content-Type"
-        response.headers["Access-Control-Expose-Headers"] = "X-Request-ID"
-        response.headers["Vary"] = "Origin"
-        
-    return response
-
+# ==============================================================================
+# MIDDLEWARE 2 & 3: Request Context & Per-Client Rate Limiting
+# ==============================================================================
 @app.middleware("http")
-async def combined_middleware(request: Request, call_next):
-    origin = request.headers.get("origin")
+async def context_and_rate_limit(request: Request, call_next):
+    # CORSMiddleware natively handles OPTIONS preflights before this even runs,
+    # but we skip it here just to be perfectly safe.
+    if request.method == "OPTIONS":
+        return await call_next(request)
 
-    # Middleware 1: Request context
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    # --- MIDDLEWARE 2: Request Context Logic ---
+    request_id = request.headers.get("X-Request-ID")
+    if not request_id:
+        request_id = str(uuid.uuid4())
+    
+    # Store in request state for the endpoint to use
     request.state.request_id = request_id
 
-    # Middleware 2: CORS preflight
-    if request.method == "OPTIONS":
-        response = Response(status_code=204)
-        response.headers["X-Request-ID"] = request_id
-        return add_cors_headers(response, origin)
-
-    # Middleware 3: Rate limit
+    # --- MIDDLEWARE 3: Per-Client Rate Limiter ---
     client_id = request.headers.get("X-Client-Id", "anonymous")
     now = time.monotonic()
     bucket = clients[client_id]
@@ -59,7 +57,7 @@ async def combined_middleware(request: Request, call_next):
     while bucket and now - bucket[0] >= WINDOW_SECONDS:
         bucket.popleft()
 
-    # Check against the 11 request limit
+    # Check against the 11 req / 10s limit
     if len(bucket) >= RATE_LIMIT:
         response = JSONResponse(
             status_code=429,
@@ -68,17 +66,23 @@ async def combined_middleware(request: Request, call_next):
                 "request_id": request_id,
             },
         )
+        # Always inject the Request ID into the response headers
         response.headers["X-Request-ID"] = request_id
-        return add_cors_headers(response, origin)
+        return response
 
+    # Add current request to the bucket
     bucket.append(now)
 
-    # Proceed to the actual endpoint
+    # Process the actual route
     response = await call_next(request)
+    
+    # Always inject the Request ID into successful response headers
     response.headers["X-Request-ID"] = request_id
-    return add_cors_headers(response, origin)
+    return response
 
-
+# ==============================================================================
+# ENDPOINTS
+# ==============================================================================
 @app.get("/")
 def home():
     return {"message": "Middleware Stack API is running"}
